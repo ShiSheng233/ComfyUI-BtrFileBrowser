@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   --btrfb-text: #e9ecf2;
   --btrfb-text-soft: #aeb8cb;

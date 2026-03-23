@@ -16,12 +16,14 @@
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
     "i18next": "^23.10.2",
     "i18next-browser-languagedetector": "^7.2.2",
     "i18next-http-backend": "^2.5.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-i18next": "^14.1.0"
+    "react-i18next": "^14.1.0",
+    "tailwindcss": "^4.2.2"
   },
   "devDependencies": {
     "@comfyorg/comfyui-frontend-types": "^1.42.8",

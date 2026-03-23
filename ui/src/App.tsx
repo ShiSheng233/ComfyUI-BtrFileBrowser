@@ -8,8 +8,6 @@ import {
   type ReactNode
 } from 'react'
 
-import './App.css'
-
 declare global {
   interface Window {
     app?: ComfyApp
@@ -101,14 +99,18 @@ function LazyRender({ children }: { children: ReactNode }): JSX.Element {
           observer.disconnect()
         }
       },
-      { rootMargin: '240px' }
+      { rootMargin: '260px' }
     )
 
     observer.observe(element)
     return () => observer.disconnect()
   }, [])
 
-  return <div ref={ref}>{visible ? children : <div className="btrfb-thumb-placeholder" />}</div>
+  return (
+    <div ref={ref} className="h-full w-full">
+      {visible ? children : <div className="h-full w-full animate-pulse bg-slate-700/20" />}
+    </div>
+  )
 }
 
 function App() {
@@ -138,7 +140,7 @@ function App() {
 
   const breadcrumbs = useMemo(() => {
     const chunks = currentPath.split('/').filter(Boolean)
-    const parts: Breadcrumb[] = [{ label: root, path: '' }]
+    const parts: Breadcrumb[] = [{ label: root === 'output' ? 'Output' : 'Input', path: '' }]
     let merged = ''
     for (const chunk of chunks) {
       merged = merged ? `${merged}/${chunk}` : chunk
@@ -226,7 +228,7 @@ function App() {
       const message = await response.text()
       window.app?.extensionManager.toast.add({
         severity: 'error',
-        summary: 'Delete failed',
+        summary: 'Delete Failed',
         detail: message,
         life: 4000
       })
@@ -246,7 +248,7 @@ function App() {
   }
 
   const renameAsset = async (item: AssetItem) => {
-    const nextName = window.prompt('New name', item.name)
+    const nextName = window.prompt('Rename To', item.name)
     if (!nextName || nextName === item.name) return
 
     const response = await fetch('/btrfb/file/rename', {
@@ -259,7 +261,7 @@ function App() {
       const message = await response.text()
       window.app?.extensionManager.toast.add({
         severity: 'error',
-        summary: 'Rename failed',
+        summary: 'Rename Failed',
         detail: message,
         life: 4000
       })
@@ -270,7 +272,7 @@ function App() {
   }
 
   const createFolder = async () => {
-    const name = window.prompt('Folder name')
+    const name = window.prompt('Folder Name')
     if (!name) return
     const response = await fetch('/btrfb/file/mkdir', {
       method: 'POST',
@@ -282,7 +284,7 @@ function App() {
       const message = await response.text()
       window.app?.extensionManager.toast.add({
         severity: 'error',
-        summary: 'Create folder failed',
+        summary: 'Create Folder Failed',
         detail: message,
         life: 4000
       })
@@ -296,77 +298,109 @@ function App() {
     ? buildUrl('/btrfb/file', { root: selected.root, path: selected.path })
     : null
 
+  const controlButtonClass =
+    'rounded-md border border-[color:var(--btrfb-border)] bg-[color:var(--btrfb-surface)] px-2.5 py-1.5 text-xs font-medium text-[color:var(--btrfb-text)] shadow-sm transition hover:bg-[color:var(--btrfb-surface-strong)]'
+
   return (
-    <div className="btrfb-container">
-      <header className="btrfb-header">
-        <h2>Btr File Browser</h2>
-        <div className="btrfb-root-toggle">
+    <div className="flex h-full flex-col gap-3 overflow-hidden bg-[color:var(--btrfb-surface)] p-3 text-[color:var(--btrfb-text)]">
+      <header className="flex items-center justify-between gap-2">
+        <h2 className="m-0 text-sm font-semibold tracking-wide">Btr File Browser</h2>
+        <div className="inline-flex rounded-md border border-[color:var(--btrfb-border)] p-0.5">
           <button
-            className={root === 'output' ? 'active' : ''}
+            className={`rounded px-2.5 py-1 text-xs font-medium transition ${
+              root === 'output'
+                ? 'bg-[color:var(--btrfb-surface-strong)] text-[color:var(--btrfb-text)]'
+                : 'text-[color:var(--btrfb-text-soft)] hover:bg-white/5'
+            }`}
             onClick={() => {
               setRoot('output')
               setCurrentPath('')
             }}
           >
-            output
+            Output
           </button>
           <button
-            className={root === 'input' ? 'active' : ''}
+            className={`rounded px-2.5 py-1 text-xs font-medium transition ${
+              root === 'input'
+                ? 'bg-[color:var(--btrfb-surface-strong)] text-[color:var(--btrfb-text)]'
+                : 'text-[color:var(--btrfb-text-soft)] hover:bg-white/5'
+            }`}
             onClick={() => {
               setRoot('input')
               setCurrentPath('')
             }}
           >
-            input
+            Input
           </button>
         </div>
       </header>
 
-      <div className="btrfb-controls">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-6">
         <input
+          className="col-span-2 rounded-md border border-[color:var(--btrfb-border)] bg-[color:var(--btrfb-surface-strong)] px-3 py-1.5 text-xs text-[color:var(--btrfb-text)] placeholder:text-[color:var(--btrfb-text-soft)] focus:outline-none"
           value={searchValue}
           onChange={(event) => setSearchValue(event.target.value)}
-          placeholder="Search images/videos"
+          placeholder="Search Images Or Videos"
         />
-        <select value={sortBy} onChange={(event) => setSortBy(event.target.value as SortType)}>
-          <option value="mtime">Sort: time</option>
-          <option value="name">Sort: name</option>
-          <option value="size">Sort: size</option>
+        <select
+          className={controlButtonClass}
+          value={sortBy}
+          onChange={(event) => setSortBy(event.target.value as SortType)}
+        >
+          <option value="mtime">Sort: Modified Time</option>
+          <option value="name">Sort: Name</option>
+          <option value="size">Sort: Size</option>
         </select>
         <button
+          className={controlButtonClass}
           onClick={() => setSortOrder((value) => (value === 'desc' ? 'asc' : 'desc'))}
-          title="Toggle order"
+          title="Toggle Sort Order"
         >
-          {sortOrder === 'desc' ? 'DESC' : 'ASC'}
+          {sortOrder === 'desc' ? 'Descending' : 'Ascending'}
         </button>
-        <button onClick={refresh}>Refresh</button>
-        <button onClick={createFolder}>New Folder</button>
+        <button className={controlButtonClass} onClick={refresh}>
+          Refresh
+        </button>
+        <button className={controlButtonClass} onClick={createFolder}>
+          New Folder
+        </button>
       </div>
 
-      <div className="btrfb-breadcrumbs">
-        <button onClick={goUp} disabled={!currentPath}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <button className={controlButtonClass} onClick={goUp} disabled={!currentPath}>
           Up
         </button>
         {breadcrumbs.map((crumb) => (
-          <button key={crumb.path || 'root'} onClick={() => openDirectory(crumb.path)}>
+          <button
+            key={crumb.path || 'root'}
+            className="rounded-full border border-[color:var(--btrfb-border)] bg-transparent px-2.5 py-1 text-[11px] font-medium text-[color:var(--btrfb-text-soft)] transition hover:bg-white/5"
+            onClick={() => openDirectory(crumb.path)}
+          >
             {crumb.label}
           </button>
         ))}
       </div>
 
-      <div className="btrfb-meta">{totalCount} assets</div>
+      <div className="text-[11px] font-medium text-[color:var(--btrfb-text-soft)]">{totalCount} Assets</div>
 
-      {error && <div className="btrfb-error">{error}</div>}
+      {error && (
+        <div className="rounded-md border border-red-500/40 bg-red-500/15 px-3 py-2 text-xs text-red-200">
+          {error}
+        </div>
+      )}
 
       <div
-        className="btrfb-grid"
+        className="grid flex-1 auto-rows-max content-start gap-2 overflow-y-auto pr-1"
         style={{
           gridTemplateColumns: `repeat(auto-fill, minmax(${thumbSize}px, 1fr))`
         }}
       >
         {loading && items.length === 0
           ? Array.from({ length: 10 }).map((_, idx) => (
-              <div key={`s-${idx}`} className="btrfb-card btrfb-card-skeleton" />
+              <div
+                key={`s-${idx}`}
+                className="aspect-square animate-pulse rounded-xl border border-[color:var(--btrfb-border)] bg-[color:var(--btrfb-surface-strong)]"
+              />
             ))
           : items.map((item) => {
               const thumbUrl =
@@ -381,9 +415,12 @@ function App() {
                   : null
 
               return (
-                <article key={`${item.type}-${item.path}`} className="btrfb-card">
+                <article
+                  key={`${item.type}-${item.path}`}
+                  className="group flex flex-col overflow-hidden rounded-xl border border-[color:var(--btrfb-border)] bg-[color:var(--btrfb-surface-strong)]"
+                >
                   <button
-                    className="btrfb-preview"
+                    className="relative aspect-square border-b border-[color:var(--btrfb-border)] bg-black/20"
                     onClick={() => {
                       if (item.type === 'dir') {
                         openDirectory(item.path)
@@ -393,29 +430,60 @@ function App() {
                     }}
                   >
                     {item.type === 'dir' ? (
-                      <div className="btrfb-dir">DIR</div>
+                      <div className="grid h-full w-full place-items-center text-xs font-semibold tracking-wide text-[color:var(--btrfb-text-soft)]">
+                        Folder
+                      </div>
                     ) : thumbUrl ? (
                       <LazyRender>
-                        <img src={thumbUrl} alt={item.name} loading="lazy" decoding="async" />
+                        <img
+                          className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.02]"
+                          src={thumbUrl}
+                          alt={item.name}
+                          loading="lazy"
+                          decoding="async"
+                        />
                       </LazyRender>
                     ) : (
-                      <div className="btrfb-file">FILE</div>
+                      <div className="grid h-full w-full place-items-center text-xs font-semibold tracking-wide text-[color:var(--btrfb-text-soft)]">
+                        File
+                      </div>
+                    )}
+
+                    {item.type === 'file' && (
+                      <div className="pointer-events-none absolute inset-x-0 bottom-0">
+                        <div className="h-14 bg-gradient-to-t from-black/85 via-black/45 to-transparent" />
+                        <div className="absolute inset-x-0 bottom-0 px-2 pb-2 text-left">
+                          <p className="truncate text-[11px] font-medium text-white/95">{item.name}</p>
+                        </div>
+                      </div>
                     )}
                   </button>
 
-                  <div className="btrfb-card-body">
-                    <div className="btrfb-name" title={item.name}>
-                      {item.name}
+                  <div className="space-y-1 px-2.5 py-2">
+                    <div className="text-[10px] text-[color:var(--btrfb-text-soft)]">
+                      {item.type === 'dir' ? 'Folder' : item.mediaType === 'video' ? 'Video' : 'Image'}
                     </div>
-                    <div className="btrfb-sub">
-                      {item.type === 'dir' ? 'folder' : item.mediaType} • {formatDate(item.mtime)}
+                    <div className="truncate text-[10px] text-[color:var(--btrfb-text-soft)]">
+                      {formatDate(item.mtime)}
                     </div>
-                    <div className="btrfb-sub">{item.type === 'dir' ? '-' : formatBytes(item.size)}</div>
+                    <div className="text-[10px] text-[color:var(--btrfb-text-soft)]">
+                      {item.type === 'dir' ? '-' : formatBytes(item.size)}
+                    </div>
                   </div>
 
-                  <div className="btrfb-actions">
-                    <button onClick={() => renameAsset(item)}>Rename</button>
-                    <button onClick={() => void removeAsset(item)}>Delete</button>
+                  <div className="mt-auto grid grid-cols-2 border-t border-[color:var(--btrfb-border)]">
+                    <button
+                      className="border-r border-[color:var(--btrfb-border)] px-2 py-1.5 text-[11px] font-medium text-[color:var(--btrfb-text-soft)] transition hover:bg-white/5 hover:text-[color:var(--btrfb-text)]"
+                      onClick={() => renameAsset(item)}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      className="px-2 py-1.5 text-[11px] font-medium text-[color:var(--btrfb-text-soft)] transition hover:bg-red-500/10 hover:text-red-300"
+                      onClick={() => void removeAsset(item)}
+                    >
+                      Delete
+                    </button>
                   </div>
                 </article>
               )
@@ -423,28 +491,36 @@ function App() {
       </div>
 
       {nextCursor !== null && (
-        <div className="btrfb-load-more">
-          <button onClick={loadMore} disabled={loadingMore}>
-            {loadingMore ? 'Loading...' : 'Load More'}
+        <div className="flex justify-center pt-1">
+          <button className={controlButtonClass} onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Load More'}
           </button>
         </div>
       )}
 
       {selected && previewUrl && (
-        <div className="btrfb-modal" onClick={() => setSelected(null)}>
-          <div className="btrfb-modal-content" onClick={(event) => event.stopPropagation()}>
-            <div className="btrfb-modal-head">
-              <div>
-                <strong>{selected.name}</strong>
-                <div className="btrfb-sub">{selected.path}</div>
+        <div
+          className="fixed inset-0 z-[2000] grid place-items-center bg-black/75 p-4"
+          onClick={() => setSelected(null)}
+        >
+          <div
+            className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-[color:var(--btrfb-border)] bg-[color:var(--btrfb-surface-strong)]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-[color:var(--btrfb-border)] p-3">
+              <div className="min-w-0">
+                <strong className="block truncate text-sm text-[color:var(--btrfb-text)]">{selected.name}</strong>
+                <div className="truncate text-xs text-[color:var(--btrfb-text-soft)]">{selected.path}</div>
               </div>
-              <button onClick={() => setSelected(null)}>Close</button>
+              <button className={controlButtonClass} onClick={() => setSelected(null)}>
+                Close
+              </button>
             </div>
-            <div className="btrfb-modal-preview">
+            <div className="overflow-auto p-2">
               {selected.mediaType === 'video' ? (
-                <video controls preload="metadata" src={previewUrl} />
+                <video className="mx-auto max-h-[75vh] max-w-full rounded-lg" controls preload="metadata" src={previewUrl} />
               ) : (
-                <img src={previewUrl} alt={selected.name} />
+                <img className="mx-auto max-h-[75vh] max-w-full rounded-lg" src={previewUrl} alt={selected.name} />
               )}
             </div>
           </div>
