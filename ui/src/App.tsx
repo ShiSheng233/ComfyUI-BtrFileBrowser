@@ -1,541 +1,455 @@
 import { ComfyApp } from '@comfyorg/comfyui-frontend-types'
-import { useEffect, useMemo, useState } from 'react'
-import { useTranslation } from 'react-i18next'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode
+} from 'react'
 
 import './App.css'
 
-// Type definitions for the global ComfyUI objects
 declare global {
   interface Window {
     app?: ComfyApp
   }
 }
 
-// Interface for our processed node data
-interface ProcessedNode {
-  id: string | number
-  title: string
-  type: string
-  category: string
-  inputs: number
-  outputs: number
-  pos: [number, number]
+type RootType = 'input' | 'output'
+type SortType = 'name' | 'mtime' | 'size'
+type SortOrder = 'asc' | 'desc'
+type MediaType = 'image' | 'video' | null
+
+interface AssetItem {
+  name: string
+  path: string
+  type: 'dir' | 'file'
+  root: RootType
+  size: number
+  mtime: number
+  mediaType: MediaType
 }
 
-// Type for category colors
-type CategoryColors = Record<string, string>
-
-const CATEGORY_COLORS: CategoryColors = {
-  loaders: '#7e57c2',
-  conditioning: '#26a69a',
-  sampling: '#ef5350',
-  latent: '#66bb6a',
-  image: '#42a5f5',
-  mask: '#ff9800',
-  'conditioning/clip': '#26a69a',
-  'image/postprocessing': '#ec407a',
-  advanced: '#5c6bc0',
-  _default: '#78909c'
+interface AssetResponse {
+  root: RootType
+  currentPath: string
+  parentPath: string
+  items: AssetItem[]
+  nextCursor: number | null
+  total: number
 }
 
-interface NodeStatsChartProps {
-  nodeCounts: Record<string, number>
-  totalNodes: number
+interface Breadcrumb {
+  label: string
+  path: string
 }
 
-function NodeStatsChart({ nodeCounts, totalNodes }: NodeStatsChartProps) {
-  // Only show the top 8 categories for the chart
-  const topCategories = Object.entries(nodeCounts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 8)
+function getSetting<T>(id: string, fallback: T): T {
+  const settingApi = (window.app?.extensionManager as any)?.setting
+  const value = settingApi?.get(id)
+  return value === undefined || value === null ? fallback : (value as T)
+}
 
-  const chartData = topCategories.map(([category, count]) => {
-    return {
-      category,
-      count,
-      percentage: Math.round((count / totalNodes) * 100)
+function buildUrl(base: string, params: Record<string, string | number | undefined>): string {
+  const url = new URL(base, window.location.origin)
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) {
+      url.searchParams.set(key, String(value))
     }
-  })
-
-  return (
-    <div className="node-stats-chart">
-      {chartData.map((item) => (
-        <div key={item.category} className="chart-bar-container">
-          <div
-            className="chart-bar"
-            style={{
-              height: `${item.percentage * 2}px`,
-              backgroundColor:
-                CATEGORY_COLORS[item.category] || CATEGORY_COLORS._default
-            }}
-          />
-          <div className="chart-label">{item.category}</div>
-        </div>
-      ))}
-    </div>
-  )
+  }
+  return `${url.pathname}${url.search}`
 }
 
-interface CategoryFilterProps {
-  categories: string[]
-  selectedCategory: string
-  onSelectCategory: (category: string) => void
+function formatBytes(value: number): string {
+  if (value <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = value
+  let index = 0
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024
+    index += 1
+  }
+  return `${size.toFixed(index === 0 ? 0 : 1)} ${units[index]}`
 }
 
-function CategoryFilter({
-  categories,
-  selectedCategory,
-  onSelectCategory
-}: CategoryFilterProps) {
-  // Using useTranslation hook to initialize i18n context
-  useTranslation()
+function formatDate(ts: number): string {
+  return new Date(ts * 1000).toLocaleString()
+}
 
-  return (
-    <div className="category-filter">
-      <button
-        className={
-          selectedCategory === 'all' ? 'filter-button active' : 'filter-button'
+function useDebouncedValue<T>(value: T, delay: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delay)
+    return () => window.clearTimeout(timer)
+  }, [value, delay])
+  return debounced
+}
+
+function LazyRender({ children }: { children: ReactNode }): JSX.Element {
+  const [visible, setVisible] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const element = ref.current
+    if (!element) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          setVisible(true)
+          observer.disconnect()
         }
-        onClick={() => onSelectCategory('all')}
-      >
-        All
-      </button>
-      {categories.map((category) => (
-        <button
-          key={category}
-          className={
-            selectedCategory === category
-              ? 'filter-button active'
-              : 'filter-button'
-          }
-          onClick={() => onSelectCategory(category)}
-          style={{
-            borderBottom: `3px solid ${
-              CATEGORY_COLORS[category] || CATEGORY_COLORS._default
-            }`
-          }}
-        >
-          {category}
-        </button>
-      ))}
-    </div>
-  )
+      },
+      { rootMargin: '240px' }
+    )
+
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  return <div ref={ref}>{visible ? children : <div className="btrfb-thumb-placeholder" />}</div>
 }
 
 function App() {
-  const { t } = useTranslation()
-  const [nodes, setNodes] = useState<ProcessedNode[]>([])
-  const [selectedCategory, setSelectedCategory] = useState<string>('all')
-  const [isQueueRunning, setIsQueueRunning] = useState<boolean>(false)
-  const [highlightedNode, setHighlightedNode] = useState<
-    string | number | null
-  >(null)
+  const defaultRoot = getSetting<RootType>('btrfb.defaultRoot', 'output')
 
-  // Get nodes from ComfyUI graph and organize them
-  useEffect(() => {
-    if (!window.app?.graph) return
+  const [root, setRoot] = useState<RootType>(defaultRoot)
+  const [currentPath, setCurrentPath] = useState('')
+  const [items, setItems] = useState<AssetItem[]>([])
+  const [nextCursor, setNextCursor] = useState<number | null>(null)
+  const [totalCount, setTotalCount] = useState(0)
+  const [loading, setLoading] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-    // Initial node collection
-    collectNodes()
+  const [searchValue, setSearchValue] = useState('')
+  const [sortBy, setSortBy] = useState<SortType>('mtime')
+  const [sortOrder, setSortOrder] = useState<SortOrder>('desc')
 
-    // Function to collect nodes from the graph
-    function collectNodes() {
-      const graphNodes = window.app?.graph._nodes
-      if (!graphNodes) return
+  const [selected, setSelected] = useState<AssetItem | null>(null)
 
-      const currentNodes: ProcessedNode[] = []
+  const pageSize = getSetting<number>('btrfb.pageSize', 120)
+  const thumbSize = getSetting<number>('btrfb.thumbSize', 176)
+  const thumbFormat = getSetting<string>('btrfb.thumbFormat', 'webp')
+  const enableVideoThumb = getSetting<boolean>('btrfb.enableVideoThumb', true)
 
-      for (const node of graphNodes) {
-        // Extract category from constructorData if available
-        let category = ''
-        if (node.constructor && 'nodeData' in node.constructor) {
-          const nodeData = node.constructor.nodeData
-          if (
-            nodeData &&
-            typeof nodeData === 'object' &&
-            'category' in nodeData
-          ) {
-            category = nodeData.category as string
-          }
+  const debouncedSearch = useDebouncedValue(searchValue, 220)
+
+  const breadcrumbs = useMemo(() => {
+    const chunks = currentPath.split('/').filter(Boolean)
+    const parts: Breadcrumb[] = [{ label: root, path: '' }]
+    let merged = ''
+    for (const chunk of chunks) {
+      merged = merged ? `${merged}/${chunk}` : chunk
+      parts.push({ label: chunk, path: merged })
+    }
+    return parts
+  }, [currentPath, root])
+
+  const fetchAssets = useCallback(
+    async (cursor = 0, append = false) => {
+      if (append) {
+        setLoadingMore(true)
+      } else {
+        setLoading(true)
+        setError(null)
+      }
+
+      try {
+        const url = buildUrl('/btrfb/assets', {
+          root,
+          path: currentPath,
+          cursor,
+          limit: pageSize,
+          q: debouncedSearch || undefined,
+          sort: sortBy,
+          order: sortOrder
+        })
+
+        const response = await fetch(url)
+        if (!response.ok) {
+          throw new Error(await response.text())
         }
 
-        currentNodes.push({
-          id: node.id,
-          title: node.title,
-          type: node.type,
-          category: category,
-          inputs: node.inputs?.length || 0,
-          outputs: node.outputs?.length || 0,
-          pos: [...node.pos] as [number, number] // Clone position array
-        })
+        const payload = (await response.json()) as AssetResponse
+        setItems((previous) => (append ? [...previous, ...payload.items] : payload.items))
+        setNextCursor(payload.nextCursor)
+        setTotalCount(payload.total)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Failed to load assets'
+        setError(message)
+      } finally {
+        setLoading(false)
+        setLoadingMore(false)
       }
+    },
+    [root, currentPath, pageSize, debouncedSearch, sortBy, sortOrder]
+  )
 
-      setNodes(currentNodes)
-    }
-
-    // Listen for graph changes using the API (not graph directly)
-    const handleGraphChanged = () => {
-      collectNodes()
-    }
-
-    window.app?.api.addEventListener('graphChanged', handleGraphChanged)
-
-    return () => {
-      window.app?.api.removeEventListener('graphChanged', handleGraphChanged)
-    }
-  }, [])
-
-  // Monitor queue status
   useEffect(() => {
-    if (!window.app?.api) return
+    void fetchAssets(0, false)
+  }, [fetchAssets])
 
-    const handleQueueStart = () => setIsQueueRunning(true)
-    const handleQueueComplete = () => setIsQueueRunning(false)
+  const openDirectory = (path: string) => {
+    setCurrentPath(path)
+  }
 
-    // Using the Event API with properly typed events
-    window.app.api.addEventListener('execution_start', handleQueueStart)
+  const goUp = () => {
+    if (!currentPath) return
+    const parent = currentPath.includes('/')
+      ? currentPath.slice(0, currentPath.lastIndexOf('/'))
+      : ''
+    setCurrentPath(parent)
+  }
 
-    // Since 'execution_complete' is not directly in the types, we add a compatibility approach
-    type ApiEventName = Parameters<typeof window.app.api.addEventListener>[0]
-    window.app.api.addEventListener(
-      'execution_complete' as ApiEventName,
-      handleQueueComplete
-    )
+  const refresh = () => {
+    void fetchAssets(0, false)
+  }
 
-    return () => {
-      window.app?.api.removeEventListener('execution_start', handleQueueStart)
-      window.app?.api.removeEventListener(
-        'execution_complete' as ApiEventName,
-        handleQueueComplete
-      )
+  const loadMore = () => {
+    if (nextCursor === null || loadingMore) return
+    void fetchAssets(nextCursor, true)
+  }
+
+  const removeAsset = async (item: AssetItem) => {
+    const ok = window.confirm(`Delete ${item.name}?`)
+    if (!ok) return
+
+    const response = await fetch('/btrfb/file/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: item.root, path: item.path })
+    })
+
+    if (!response.ok) {
+      const message = await response.text()
+      window.app?.extensionManager.toast.add({
+        severity: 'error',
+        summary: 'Delete failed',
+        detail: message,
+        life: 4000
+      })
+      return
     }
-  }, [])
 
-  // Handle node highlighting
-  useEffect(() => {
-    if (!highlightedNode || !window.app?.graph) return
-
-    // Find the node in the graph
-    const graphNodes = window.app.graph._nodes
-    const node = graphNodes.find((n) => n.id === highlightedNode)
-    if (!node) return
-
-    // Center camera on node with smooth animation
-    window.app.canvas.centerOnNode(node)
-
-    // Highlight the node
-    const originalColor = node.color
-    node.color = '#ff5722'
-    window.app.graph.setDirtyCanvas(true, false)
-
-    // Reset highlight after a delay
-    const timeout = setTimeout(() => {
-      if (window.app?.graph._nodes.includes(node)) {
-        node.color = originalColor
-        window.app.graph.setDirtyCanvas(true, false)
-      }
-    }, 2000)
-
-    return () => {
-      clearTimeout(timeout)
-      // Restore original color if component unmounts
-      if (window.app?.graph._nodes.includes(node)) {
-        node.color = originalColor
-        window.app.graph.setDirtyCanvas(true, false)
-      }
+    window.app?.extensionManager.toast.add({
+      severity: 'success',
+      summary: 'Deleted',
+      detail: item.name,
+      life: 1800
+    })
+    if (selected?.path === item.path && selected.root === item.root) {
+      setSelected(null)
     }
-  }, [highlightedNode])
+    void fetchAssets(0, false)
+  }
 
-  // Calculate statistics from nodes
-  const { filteredNodes, categories, nodeCounts, totalNodes } = useMemo(() => {
-    // Get filtered nodes based on selected category
-    const filtered =
-      selectedCategory === 'all'
-        ? nodes
-        : nodes.filter((node) => node.category === selectedCategory)
+  const renameAsset = async (item: AssetItem) => {
+    const nextName = window.prompt('New name', item.name)
+    if (!nextName || nextName === item.name) return
 
-    // Get unique categories
-    const uniqueCategories = [
-      ...new Set(nodes.map((node) => node.category))
-    ].sort()
+    const response = await fetch('/btrfb/file/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: item.root, path: item.path, newName: nextName })
+    })
 
-    // Count nodes by category
-    const counts = nodes.reduce((acc: Record<string, number>, node) => {
-      const category = node.category
-      acc[category] = (acc[category] || 0) + 1
-      return acc
-    }, {})
-
-    return {
-      filteredNodes: filtered,
-      categories: uniqueCategories,
-      nodeCounts: counts,
-      totalNodes: nodes.length
+    if (!response.ok) {
+      const message = await response.text()
+      window.app?.extensionManager.toast.add({
+        severity: 'error',
+        summary: 'Rename failed',
+        detail: message,
+        life: 4000
+      })
+      return
     }
-  }, [nodes, selectedCategory])
+
+    void fetchAssets(0, false)
+  }
+
+  const createFolder = async () => {
+    const name = window.prompt('Folder name')
+    if (!name) return
+    const response = await fetch('/btrfb/file/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root, path: currentPath, name })
+    })
+
+    if (!response.ok) {
+      const message = await response.text()
+      window.app?.extensionManager.toast.add({
+        severity: 'error',
+        summary: 'Create folder failed',
+        detail: message,
+        life: 4000
+      })
+      return
+    }
+
+    void fetchAssets(0, false)
+  }
+
+  const previewUrl = selected
+    ? buildUrl('/btrfb/file', { root: selected.root, path: selected.path })
+    : null
 
   return (
-    <div className="react-example-container">
-      <h2>{t('app.title')}</h2>
-
-      <div className="stats-overview">
-        <div className="stat-card">
-          <div className="stat-value">{totalNodes}</div>
-          <div className="stat-label">{t('app.nodeStats.totalNodes')}</div>
+    <div className="btrfb-container">
+      <header className="btrfb-header">
+        <h2>Btr File Browser</h2>
+        <div className="btrfb-root-toggle">
+          <button
+            className={root === 'output' ? 'active' : ''}
+            onClick={() => {
+              setRoot('output')
+              setCurrentPath('')
+            }}
+          >
+            output
+          </button>
+          <button
+            className={root === 'input' ? 'active' : ''}
+            onClick={() => {
+              setRoot('input')
+              setCurrentPath('')
+            }}
+          >
+            input
+          </button>
         </div>
-        <div className="stat-card">
-          <div className="stat-value">{categories.length}</div>
-          <div className="stat-label">{t('app.nodeStats.uniqueNodeTypes')}</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">{isQueueRunning ? 'Active' : 'Idle'}</div>
-          <div className="stat-label">Queue Status</div>
-        </div>
-      </div>
+      </header>
 
-      <div className="dashboard-section">
-        <h3>Node Type Distribution</h3>
-        {totalNodes > 0 ? (
-          <NodeStatsChart nodeCounts={nodeCounts} totalNodes={totalNodes} />
-        ) : (
-          <div className="empty-state">{t('app.noNodes')}</div>
-        )}
-      </div>
-
-      <div className="dashboard-section">
-        <h3>{t('app.nodeList.title')}</h3>
-        <CategoryFilter
-          categories={categories}
-          selectedCategory={selectedCategory}
-          onSelectCategory={setSelectedCategory}
+      <div className="btrfb-controls">
+        <input
+          value={searchValue}
+          onChange={(event) => setSearchValue(event.target.value)}
+          placeholder="Search images/videos"
         />
-
-        <div className="node-list">
-          {filteredNodes.length > 0 ? (
-            filteredNodes.map((node) => (
-              <div
-                key={node.id}
-                className="node-item"
-                onClick={() => setHighlightedNode(node.id)}
-              >
-                <div
-                  className="node-badge"
-                  style={{
-                    backgroundColor:
-                      CATEGORY_COLORS[node.category] || CATEGORY_COLORS._default
-                  }}
-                ></div>
-                <div className="node-title">{node.title}</div>
-                <div className="node-meta">
-                  <span>
-                    {t('app.nodeList.inputs')}: {node.inputs}
-                  </span>
-                  <span>
-                    {t('app.nodeList.outputs')}: {node.outputs}
-                  </span>
-                </div>
-              </div>
-            ))
-          ) : (
-            <div className="empty-state">
-              {totalNodes === 0
-                ? t('app.noNodes')
-                : 'No nodes match the selected filter'}
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div className="dashboard-section" style={{ marginTop: '20px' }}>
-        <h3>API Examples</h3>
-        <div
-          className="api-examples"
-          style={{ display: 'flex', flexWrap: 'wrap', gap: '10px' }}
+        <select value={sortBy} onChange={(event) => setSortBy(event.target.value as SortType)}>
+          <option value="mtime">Sort: time</option>
+          <option value="name">Sort: name</option>
+          <option value="size">Sort: size</option>
+        </select>
+        <button
+          onClick={() => setSortOrder((value) => (value === 'desc' ? 'asc' : 'desc'))}
+          title="Toggle order"
         >
-          <h4>Dialog API</h4>
-          <button
-            className="dialog-btn"
-            onClick={() => {
-              // Dialog API Example - Prompt
-              void window.app?.extensionManager.dialog
-                .prompt({
-                  title: 'Dialog API Demo',
-                  message:
-                    'This is a prompt dialog example. Please enter something:',
-                  defaultValue: 'Dialog API is great!'
-                })
-                .then((result) => {
-                  if (result !== null) {
-                    alert(`You entered: ${result}`)
-                  }
-                })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#2196F3',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Prompt Dialog
-          </button>
+          {sortOrder === 'desc' ? 'DESC' : 'ASC'}
+        </button>
+        <button onClick={refresh}>Refresh</button>
+        <button onClick={createFolder}>New Folder</button>
+      </div>
 
-          <button
-            className="dialog-btn"
-            onClick={() => {
-              // Dialog API Example - Confirm
-              void window.app?.extensionManager.dialog
-                .confirm({
-                  title: 'Confirm Action',
-                  message: 'This is a confirmation dialog example.',
-                  type: 'default'
-                })
-                .then((result) => {
-                  alert(result ? 'You confirmed!' : 'You cancelled!')
-                })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#FF9800',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Confirm Dialog
+      <div className="btrfb-breadcrumbs">
+        <button onClick={goUp} disabled={!currentPath}>
+          Up
+        </button>
+        {breadcrumbs.map((crumb) => (
+          <button key={crumb.path || 'root'} onClick={() => openDirectory(crumb.path)}>
+            {crumb.label}
           </button>
+        ))}
+      </div>
 
-          <h4>Toast API</h4>
-          <button
-            className="toast-btn"
-            onClick={() => {
-              // Toast API Example - Info
-              window.app?.extensionManager.toast.add({
-                severity: 'info',
-                summary: 'Information',
-                detail: 'This is an info toast message',
-                life: 3000
-              })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#2196F3',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Info Toast
-          </button>
+      <div className="btrfb-meta">{totalCount} assets</div>
 
-          <button
-            className="toast-btn"
-            onClick={() => {
-              // Toast API Example - Success
-              window.app?.extensionManager.toast.add({
-                severity: 'success',
-                summary: 'Success',
-                detail: 'Operation completed successfully!',
-                life: 3000
-              })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#4CAF50',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Success Toast
-          </button>
+      {error && <div className="btrfb-error">{error}</div>}
 
-          <button
-            className="toast-btn"
-            onClick={() => {
-              // Toast API Example - Warning
-              window.app?.extensionManager.toast.add({
-                severity: 'warn',
-                summary: 'Warning',
-                detail: 'This action may cause issues!',
-                life: 5000
-              })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#FF9800',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Warning Toast
-          </button>
+      <div
+        className="btrfb-grid"
+        style={{
+          gridTemplateColumns: `repeat(auto-fill, minmax(${thumbSize}px, 1fr))`
+        }}
+      >
+        {loading && items.length === 0
+          ? Array.from({ length: 10 }).map((_, idx) => (
+              <div key={`s-${idx}`} className="btrfb-card btrfb-card-skeleton" />
+            ))
+          : items.map((item) => {
+              const thumbUrl =
+                item.type === 'file' && (item.mediaType === 'image' || enableVideoThumb)
+                  ? buildUrl('/btrfb/thumb', {
+                      root: item.root,
+                      path: item.path,
+                      w: thumbSize,
+                      h: thumbSize,
+                      format: thumbFormat
+                    })
+                  : null
 
-          <button
-            className="toast-btn"
-            onClick={() => {
-              // Toast API Example - Error
-              window.app?.extensionManager.toast.add({
-                severity: 'error',
-                summary: 'Error',
-                detail: 'Something went wrong!',
-                life: 5000
-              })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#F44336',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Error Toast
-          </button>
+              return (
+                <article key={`${item.type}-${item.path}`} className="btrfb-card">
+                  <button
+                    className="btrfb-preview"
+                    onClick={() => {
+                      if (item.type === 'dir') {
+                        openDirectory(item.path)
+                      } else {
+                        setSelected(item)
+                      }
+                    }}
+                  >
+                    {item.type === 'dir' ? (
+                      <div className="btrfb-dir">DIR</div>
+                    ) : thumbUrl ? (
+                      <LazyRender>
+                        <img src={thumbUrl} alt={item.name} loading="lazy" decoding="async" />
+                      </LazyRender>
+                    ) : (
+                      <div className="btrfb-file">FILE</div>
+                    )}
+                  </button>
 
-          <button
-            className="toast-btn"
-            onClick={() => {
-              // Toast API Example - Alert alternative using regular toast
-              window.app?.extensionManager.toast.add({
-                severity: 'info',
-                summary: 'Alert',
-                detail: 'This is an alert message!',
-                life: 3000
-              })
-            }}
-            style={{
-              padding: '8px 12px',
-              backgroundColor: '#673AB7',
-              color: 'white',
-              border: 'none',
-              borderRadius: '4px',
-              cursor: 'pointer',
-              margin: '5px'
-            }}
-          >
-            Show Alert Toast
+                  <div className="btrfb-card-body">
+                    <div className="btrfb-name" title={item.name}>
+                      {item.name}
+                    </div>
+                    <div className="btrfb-sub">
+                      {item.type === 'dir' ? 'folder' : item.mediaType} • {formatDate(item.mtime)}
+                    </div>
+                    <div className="btrfb-sub">{item.type === 'dir' ? '-' : formatBytes(item.size)}</div>
+                  </div>
+
+                  <div className="btrfb-actions">
+                    <button onClick={() => renameAsset(item)}>Rename</button>
+                    <button onClick={() => void removeAsset(item)}>Delete</button>
+                  </div>
+                </article>
+              )
+            })}
+      </div>
+
+      {nextCursor !== null && (
+        <div className="btrfb-load-more">
+          <button onClick={loadMore} disabled={loadingMore}>
+            {loadingMore ? 'Loading...' : 'Load More'}
           </button>
         </div>
-      </div>
+      )}
 
-      <div className="footer">
-        <p>{t('app.footer.clickToHighlight')}</p>
-      </div>
+      {selected && previewUrl && (
+        <div className="btrfb-modal" onClick={() => setSelected(null)}>
+          <div className="btrfb-modal-content" onClick={(event) => event.stopPropagation()}>
+            <div className="btrfb-modal-head">
+              <div>
+                <strong>{selected.name}</strong>
+                <div className="btrfb-sub">{selected.path}</div>
+              </div>
+              <button onClick={() => setSelected(null)}>Close</button>
+            </div>
+            <div className="btrfb-modal-preview">
+              {selected.mediaType === 'video' ? (
+                <video controls preload="metadata" src={previewUrl} />
+              ) : (
+                <img src={previewUrl} alt={selected.name} />
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

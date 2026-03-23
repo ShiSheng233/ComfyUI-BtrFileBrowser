@@ -4,8 +4,11 @@ from aiohttp import web
 import folder_paths
 import nodes
 
+from .api_routes import register_routes
+
 NODE_CLASS_MAPPINGS = {}
-__all__ = ["NODE_CLASS_MAPPINGS"]
+WEB_DIRECTORY = "./dist"
+__all__ = ["NODE_CLASS_MAPPINGS", "WEB_DIRECTORY"]
 
 # Define the path to our extension
 workspace_path = os.path.dirname(__file__)
@@ -49,5 +52,6 @@ if os.path.exists(dist_path):
         print(f"Could not load project config, using default name '{project_name}': {e}")
 
     nodes.EXTENSION_WEB_DIRS[project_name] = os.path.join(workspace_path, "dist")
+    register_routes()
 else:
     print("ComfyUI Example React Extension: Web directory not found")
