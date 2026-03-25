@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -36,6 +37,14 @@ CACHE_DIR = Path(tempfile.gettempdir()) / "comfyui_btr_file_browser_thumbs"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _json_error(status: int, message: str, code: str) -> web.Response:
+    return web.Response(
+        status=status,
+        content_type="application/json",
+        text=json.dumps({"error": message, "code": code}),
+    )
+
+
 def _get_root_paths() -> dict[str, Path]:
     output_dir = None
     input_dir = None
@@ -55,28 +64,45 @@ def _get_root_paths() -> dict[str, Path]:
     if input_dir is None:
         input_dir = os.path.join(folder_paths.base_path, "input")
 
+    temp_dir = None
+    if hasattr(folder_paths, "get_temp_directory"):
+        temp_dir = folder_paths.get_temp_directory()
+    if temp_dir is None:
+        temp_dir = getattr(folder_paths, "temp_directory", None)
+    if temp_dir is None:
+        temp_dir = os.path.join(folder_paths.base_path, "temp")
+
     return {
         "output": Path(output_dir).resolve(),
         "input": Path(input_dir).resolve(),
+        "temp": Path(temp_dir).resolve(),
     }
 
 
 def _get_root_dir(root_name: str) -> Path:
     roots = _get_root_paths()
     if root_name not in roots:
-        raise web.HTTPBadRequest(text=f"Unsupported root: {root_name}")
+        raise _RootError(root_name)
     return roots[root_name]
 
 
-def _resolve_path(root_name: str, relative_path: str = "") -> Path:
-    root_dir = _get_root_dir(root_name)
+class _RootError(Exception):
+    def __init__(self, root_name: str) -> None:
+        self.root_name = root_name
+
+
+def _resolve_path(root_name: str, relative_path: str = "") -> tuple[Path, web.Response | None]:
+    roots = _get_root_paths()
+    if root_name not in roots:
+        return Path(), _json_error(400, f"Unsupported root: {root_name}", "INVALID_ROOT")
+    root_dir = roots[root_name]
     clean_relative = (relative_path or "").replace("\\", "/").strip("/")
     target = (root_dir / clean_relative).resolve()
     try:
         target.relative_to(root_dir)
     except ValueError:
-        raise web.HTTPBadRequest(text="Invalid path")
-    return target
+        return Path(), _json_error(400, "Invalid path", "INVALID_PATH")
+    return target, None
 
 
 def _detect_media_type(path: Path) -> str | None:
@@ -88,7 +114,12 @@ def _detect_media_type(path: Path) -> str | None:
     return None
 
 
-def _entry_to_item(root_name: str, root_dir: Path, entry: os.DirEntry[str]) -> dict[str, Any] | None:
+def _entry_to_item(
+    root_name: str,
+    root_dir: Path,
+    entry: os.DirEntry[str],
+    include_dims: bool = False,
+) -> dict[str, Any] | None:
     path = Path(entry.path)
     rel_path = str(path.relative_to(root_dir)).replace("\\", "/")
 
@@ -103,6 +134,8 @@ def _entry_to_item(root_name: str, root_dir: Path, entry: os.DirEntry[str]) -> d
             "size": 0,
             "mtime": int(stat.st_mtime),
             "mediaType": None,
+            "width": None,
+            "height": None,
         }
 
     media_type = _detect_media_type(path)
@@ -110,7 +143,7 @@ def _entry_to_item(root_name: str, root_dir: Path, entry: os.DirEntry[str]) -> d
         return None
 
     stat = path.stat()
-    return {
+    item: dict[str, Any] = {
         "name": entry.name,
         "path": rel_path,
         "type": "file",
@@ -118,7 +151,18 @@ def _entry_to_item(root_name: str, root_dir: Path, entry: os.DirEntry[str]) -> d
         "size": int(stat.st_size),
         "mtime": int(stat.st_mtime),
         "mediaType": media_type,
+        "width": None,
+        "height": None,
     }
+
+    if include_dims and media_type == "image":
+        try:
+            with Image.open(path) as img:
+                item["width"], item["height"] = img.size
+        except Exception:
+            pass
+
+    return item
 
 
 def _list_assets(
@@ -129,12 +173,13 @@ def _list_assets(
     query: str,
     sort_key: str,
     order: str,
+    include_dims: bool = False,
 ) -> dict[str, Any]:
-    root_dir = _get_root_dir(root_name)
+    root_dir = _get_root_paths()[root_name]
     items: list[dict[str, Any]] = []
 
     for entry in os.scandir(current_dir):
-        item = _entry_to_item(root_name, root_dir, entry)
+        item = _entry_to_item(root_name, root_dir, entry, include_dims)
         if item is None:
             continue
         if query and query.lower() not in item["name"].lower():
@@ -276,20 +321,29 @@ async def _get_thumb_response(file_path: Path, width: int, height: int, thumb_fo
 def register_routes() -> None:
     routes = PromptServer.instance.routes
 
+    @routes.get("/btrfb/roots")
+    async def list_roots(request: web.Request) -> web.Response:
+        roots = _get_root_paths()
+        payload = [{"name": name, "path": str(path)} for name, path in roots.items()]
+        return web.json_response(payload)
+
     @routes.get("/btrfb/assets")
     async def list_assets(request: web.Request) -> web.Response:
         root_name = request.query.get("root", "output")
         relative_path = request.query.get("path", "")
-        current_dir = _resolve_path(root_name, relative_path)
+        current_dir, err = _resolve_path(root_name, relative_path)
+        if err:
+            return err
 
         if not current_dir.exists() or not current_dir.is_dir():
-            raise web.HTTPNotFound(text="Directory not found")
+            return _json_error(404, "Directory not found", "NOT_FOUND")
 
         cursor = int(request.query.get("cursor", "0"))
         limit = min(max(int(request.query.get("limit", "120")), 1), 400)
         query = request.query.get("q", "").strip()
         sort_key = request.query.get("sort", "mtime")
         order = request.query.get("order", "desc")
+        include_dims = request.query.get("dims", "0") == "1"
 
         result = await asyncio.to_thread(
             _list_assets,
@@ -300,6 +354,7 @@ def register_routes() -> None:
             query,
             sort_key,
             order,
+            include_dims,
         )
         return web.json_response(result)
 
@@ -313,9 +368,11 @@ def register_routes() -> None:
         if thumb_format not in {"webp", "jpeg"}:
             thumb_format = "webp"
 
-        file_path = _resolve_path(root_name, relative_path)
+        file_path, err = _resolve_path(root_name, relative_path)
+        if err:
+            return err
         if not file_path.exists() or not file_path.is_file():
-            raise web.HTTPNotFound(text="File not found")
+            return _json_error(404, "File not found", "NOT_FOUND")
 
         return await _get_thumb_response(file_path, width, height, thumb_format)
 
@@ -323,9 +380,11 @@ def register_routes() -> None:
     async def get_file(request: web.Request) -> web.Response:
         root_name = request.query.get("root", "output")
         relative_path = request.query.get("path", "")
-        file_path = _resolve_path(root_name, relative_path)
+        file_path, err = _resolve_path(root_name, relative_path)
+        if err:
+            return err
         if not file_path.exists() or not file_path.is_file():
-            raise web.HTTPNotFound(text="File not found")
+            return _json_error(404, "File not found", "NOT_FOUND")
         return web.FileResponse(file_path)
 
     @routes.post("/btrfb/file/delete")
@@ -333,13 +392,25 @@ def register_routes() -> None:
         body = await request.json()
         root_name = str(body.get("root", "output"))
         relative_path = str(body.get("path", ""))
-        target = _resolve_path(root_name, relative_path)
+        force = bool(body.get("force", False))
 
+        target, err = _resolve_path(root_name, relative_path)
+        if err:
+            return err
         if not target.exists():
-            raise web.HTTPNotFound(text="Target does not exist")
+            return _json_error(404, "Target does not exist", "NOT_FOUND")
 
         if target.is_dir():
-            target.rmdir()
+            if force:
+                try:
+                    await asyncio.to_thread(shutil.rmtree, str(target))
+                except OSError as exc:
+                    return _json_error(500, str(exc), "DELETE_FAILED")
+            else:
+                try:
+                    target.rmdir()
+                except OSError:
+                    return _json_error(409, "Directory is not empty", "DIR_NOT_EMPTY")
         else:
             target.unlink()
 
@@ -352,18 +423,20 @@ def register_routes() -> None:
         relative_path = str(body.get("path", ""))
         new_name = str(body.get("newName", "")).strip()
         if not new_name or "/" in new_name or "\\" in new_name:
-            raise web.HTTPBadRequest(text="Invalid new name")
+            return _json_error(400, "Invalid new name", "INVALID_NAME")
 
-        target = _resolve_path(root_name, relative_path)
+        target, err = _resolve_path(root_name, relative_path)
+        if err:
+            return err
         if not target.exists():
-            raise web.HTTPNotFound(text="Target does not exist")
+            return _json_error(404, "Target does not exist", "NOT_FOUND")
 
         destination = target.with_name(new_name)
         if destination.exists():
-            raise web.HTTPConflict(text="Destination already exists")
+            return _json_error(409, "Destination already exists", "CONFLICT")
 
         target.rename(destination)
-        root_dir = _get_root_dir(root_name)
+        root_dir = _get_root_paths()[root_name]
         new_path = str(destination.relative_to(root_dir)).replace("\\", "/")
         return web.json_response({"ok": True, "path": new_path})
 
@@ -373,22 +446,59 @@ def register_routes() -> None:
         source_root = str(body.get("sourceRoot", "output"))
         source_path = str(body.get("sourcePath", ""))
         target_root = str(body.get("targetRoot", source_root))
-        target_dir = str(body.get("targetDir", ""))
+        target_dir_path = str(body.get("targetDir", ""))
 
-        source = _resolve_path(source_root, source_path)
-        destination_dir = _resolve_path(target_root, target_dir)
+        source, err = _resolve_path(source_root, source_path)
+        if err:
+            return err
+        destination_dir, err = _resolve_path(target_root, target_dir_path)
+        if err:
+            return err
 
         if not source.exists():
-            raise web.HTTPNotFound(text="Source does not exist")
+            return _json_error(404, "Source does not exist", "NOT_FOUND")
         if not destination_dir.exists() or not destination_dir.is_dir():
-            raise web.HTTPNotFound(text="Target directory does not exist")
+            return _json_error(404, "Target directory does not exist", "NOT_FOUND")
 
         destination = destination_dir / source.name
         if destination.exists():
-            raise web.HTTPConflict(text="Destination already exists")
+            return _json_error(409, "Destination already exists", "CONFLICT")
 
-        shutil.move(str(source), str(destination))
-        root_dir = _get_root_dir(target_root)
+        await asyncio.to_thread(shutil.move, str(source), str(destination))
+        root_dir = _get_root_paths()[target_root]
+        new_path = str(destination.relative_to(root_dir)).replace("\\", "/")
+        return web.json_response({"ok": True, "path": new_path, "root": target_root})
+
+    @routes.post("/btrfb/file/copy")
+    async def copy_file(request: web.Request) -> web.Response:
+        body = await request.json()
+        source_root = str(body.get("sourceRoot", "output"))
+        source_path = str(body.get("sourcePath", ""))
+        target_root = str(body.get("targetRoot", source_root))
+        target_dir_path = str(body.get("targetDir", ""))
+
+        source, err = _resolve_path(source_root, source_path)
+        if err:
+            return err
+        destination_dir, err = _resolve_path(target_root, target_dir_path)
+        if err:
+            return err
+
+        if not source.exists():
+            return _json_error(404, "Source does not exist", "NOT_FOUND")
+        if not destination_dir.exists() or not destination_dir.is_dir():
+            return _json_error(404, "Target directory does not exist", "NOT_FOUND")
+
+        destination = destination_dir / source.name
+        if destination.exists():
+            return _json_error(409, "Destination already exists", "CONFLICT")
+
+        if source.is_dir():
+            await asyncio.to_thread(shutil.copytree, str(source), str(destination))
+        else:
+            await asyncio.to_thread(shutil.copy2, str(source), str(destination))
+
+        root_dir = _get_root_paths()[target_root]
         new_path = str(destination.relative_to(root_dir)).replace("\\", "/")
         return web.json_response({"ok": True, "path": new_path, "root": target_root})
 
@@ -400,14 +510,61 @@ def register_routes() -> None:
         directory_name = str(body.get("name", "")).strip()
 
         if not directory_name or "/" in directory_name or "\\" in directory_name:
-            raise web.HTTPBadRequest(text="Invalid directory name")
+            return _json_error(400, "Invalid directory name", "INVALID_NAME")
 
-        parent = _resolve_path(root_name, parent_path)
+        parent, err = _resolve_path(root_name, parent_path)
+        if err:
+            return err
         if not parent.exists() or not parent.is_dir():
-            raise web.HTTPNotFound(text="Parent directory does not exist")
+            return _json_error(404, "Parent directory does not exist", "NOT_FOUND")
 
         new_dir = parent / directory_name
+        if new_dir.exists():
+            return _json_error(409, "Directory already exists", "CONFLICT")
         new_dir.mkdir(parents=False, exist_ok=False)
-        root_dir = _get_root_dir(root_name)
+
+        root_dir = _get_root_paths()[root_name]
         rel = str(new_dir.relative_to(root_dir)).replace("\\", "/")
         return web.json_response({"ok": True, "path": rel})
+
+    @routes.post("/btrfb/upload")
+    async def upload_file(request: web.Request) -> web.Response:
+        reader = await request.multipart()
+
+        root_name: str | None = None
+        target_path = ""
+        saved_files: list[dict[str, str]] = []
+
+        async for part in reader:
+            if part.name == "root":
+                root_name = (await part.read()).decode("utf-8").strip()
+            elif part.name == "path":
+                target_path = (await part.read()).decode("utf-8").strip()
+            elif part.name == "file":
+                if root_name is None:
+                    return _json_error(400, "'root' field must come before 'file' in multipart body", "INVALID_ORDER")
+
+                filename = part.filename or ""
+                filename = Path(filename).name
+                if not filename:
+                    return _json_error(400, "Invalid or missing filename", "INVALID_NAME")
+
+                dest_dir, err = _resolve_path(root_name, target_path)
+                if err:
+                    return err
+                if not dest_dir.exists() or not dest_dir.is_dir():
+                    return _json_error(404, "Target directory does not exist", "NOT_FOUND")
+
+                dest_file = dest_dir / filename
+                with dest_file.open("wb") as f:
+                    while True:
+                        chunk = await part.read_chunk(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+
+                root_dir = _get_root_paths()[root_name]
+                rel = str(dest_file.relative_to(root_dir)).replace("\\", "/")
+                saved_files.append({"name": filename, "path": rel, "root": root_name})
+
+        return web.json_response({"ok": True, "files": saved_files})

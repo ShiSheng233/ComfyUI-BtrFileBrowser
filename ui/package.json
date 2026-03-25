@@ -13,7 +13,8 @@
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "test": "jest",
-    "test:watch": "jest --watch"
+    "test:watch": "jest --watch",
+    "pack": "npm run build && (cd .. && rm -rf BtrFileBrowser.zip && zip -r BtrFileBrowser.zip __init__.py api_routes.py pyproject.toml README.md LICENSE dist -x '*.DS_Store' -x '*/__pycache__/*' -x '*/.git/*')"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.2",

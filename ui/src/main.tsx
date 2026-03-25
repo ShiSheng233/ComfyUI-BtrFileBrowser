@@ -44,7 +44,8 @@ function registerExtension(app: ComfyApp): void {
         defaultValue: 'output',
         options: [
           { text: 'output', value: 'output' },
-          { text: 'input', value: 'input' }
+          { text: 'input', value: 'input' },
+          { text: 'temp', value: 'temp' }
         ],
         category: ['Btr File Browser', 'General', 'Default root folder']
       },
@@ -91,6 +92,13 @@ function registerExtension(app: ComfyApp): void {
         type: 'boolean',
         defaultValue: true,
         category: ['Btr File Browser', 'Performance', 'Generate video thumbnails']
+      },
+      {
+        id: 'btrfb.showDimensions',
+        name: 'Show image dimensions',
+        type: 'boolean',
+        defaultValue: true,
+        category: ['Btr File Browser', 'Display', 'Show image dimensions']
       }
     ]
   })

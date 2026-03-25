@@ -1,25 +1,33 @@
 @import "tailwindcss";
 
 :root {
-  --btrfb-text: #e9ecf2;
-  --btrfb-text-soft: #aeb8cb;
-  --btrfb-surface: #1b2433;
-  --btrfb-surface-strong: #131b27;
-  --btrfb-border: #2e3950;
+  --btrfb-text: #e2e8f4;
+  --btrfb-text-soft: #8a96ad;
+  --btrfb-surface: #141a24;
+  --btrfb-surface-2: #1c2535;
+  --btrfb-surface-3: #232e42;
+  --btrfb-border: #2a3548;
+  --btrfb-border-soft: #1e2a3c;
+  --btrfb-accent: #4f8ef7;
+  --btrfb-accent-soft: rgba(79, 142, 247, 0.15);
 }
 
 :root.comfy-theme-light #comfyui-btr-file-browser-root {
   --btrfb-text: #1a2534;
-  --btrfb-text-soft: #526079;
-  --btrfb-surface: #f6f8fc;
-  --btrfb-surface-strong: #ffffff;
-  --btrfb-border: #d4ddee;
+  --btrfb-text-soft: #566579;
+  --btrfb-surface: #f0f3f8;
+  --btrfb-surface-2: #ffffff;
+  --btrfb-surface-3: #e8edf5;
+  --btrfb-border: #ccd5e3;
+  --btrfb-border-soft: #dde3ed;
+  --btrfb-accent: #2563eb;
+  --btrfb-accent-soft: rgba(37, 99, 235, 0.12);
 }
 
 #comfyui-btr-file-browser-root {
   height: 100%;
   width: 100%;
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
 }
 
 #comfyui-btr-file-browser-root * {
